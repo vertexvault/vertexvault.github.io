@@ -5,26 +5,46 @@ const magnifier = document.getElementById('magnifier');
 
 const COLORS = ['#ffffff', '#000000', '#ff4d4f', '#fa8c16', '#fadb14', '#52c41a', '#1677ff', '#722ed1'];
 const SIZES = [2, 4, 6];
-const TOOLS = ['rect', 'ellipse', 'emoji', 'arrow', 'brush', 'mosaic', 'text'];
+const TOOL_ORDER = ['rect', 'ellipse', 'emoji', 'arrow', 'brush', 'mosaic', 'text'];
+
+const TOOL_LABELS = {
+  rect: '矩形',
+  ellipse: '椭圆',
+  emoji: '表情',
+  arrow: '箭头',
+  brush: '画笔',
+  mosaic: '马赛克',
+  text: '文字',
+  scroll: '滚动截图',
+  pin: '钉图',
+  undo: '撤销',
+  save: '保存',
+  copy: '复制',
+  cancel: '取消',
+  ok: '确认'
+};
 
 const state = {
-  mode: 'idle',
+  mode: 'idle', // idle -> selecting -> selected
   activeTool: 'rect',
-  color: COLORS[0],
-  size: SIZES[0],
+  color: COLORS[2],
+  size: SIZES[1],
   screenshotImage: null,
   selection: null,
   dragStart: null,
+  moveOffset: null,
   resizeDir: null,
-  hoverHandle: null,
   annotations: [],
   history: [],
   drawing: null,
-  mouse: { x: 0, y: 0 }
+  hintText: '拖拽鼠标框选截图区域'
 };
 
 const offscreen = document.createElement('canvas');
 const offctx = offscreen.getContext('2d');
+
+const HANDLE_SIZE = 8;
+const MIN_SELECT_SIZE = 10;
 
 function resizeCanvas() {
   canvas.width = window.innerWidth;
@@ -35,49 +55,88 @@ function resizeCanvas() {
 }
 window.addEventListener('resize', resizeCanvas);
 
-function normalizeRect(a, b) {
+function setHint(text) {
+  state.hintText = text;
+  render();
+}
+
+function normalizeRect(start, end) {
   return {
-    x: Math.min(a.x, b.x),
-    y: Math.min(a.y, b.y),
-    w: Math.abs(a.x - b.x),
-    h: Math.abs(a.y - b.y)
+    x: Math.min(start.x, end.x),
+    y: Math.min(start.y, end.y),
+    w: Math.abs(start.x - end.x),
+    h: Math.abs(start.y - end.y)
   };
 }
 
+function clampSelection() {
+  if (!state.selection) return;
+  state.selection.x = Math.max(0, Math.min(canvas.width - state.selection.w, state.selection.x));
+  state.selection.y = Math.max(0, Math.min(canvas.height - state.selection.h, state.selection.y));
+  state.selection.w = Math.max(MIN_SELECT_SIZE, Math.min(canvas.width - state.selection.x, state.selection.w));
+  state.selection.h = Math.max(MIN_SELECT_SIZE, Math.min(canvas.height - state.selection.y, state.selection.h));
+}
+
 function pointInRect(pt, rect) {
-  return rect && pt.x >= rect.x && pt.x <= rect.x + rect.w && pt.y >= rect.y && pt.y <= rect.y + rect.h;
+  return !!rect && pt.x >= rect.x && pt.x <= rect.x + rect.w && pt.y >= rect.y && pt.y <= rect.y + rect.h;
 }
 
 function getHandles(rect) {
   if (!rect) return [];
   const { x, y, w, h } = rect;
-  const mX = x + w / 2;
-  const mY = y + h / 2;
+  const midX = x + w / 2;
+  const midY = y + h / 2;
   return [
-    { dir: 'nw', x, y }, { dir: 'n', x: mX, y }, { dir: 'ne', x: x + w, y },
-    { dir: 'e', x: x + w, y: mY }, { dir: 'se', x: x + w, y: y + h }, { dir: 's', x: mX, y: y + h },
-    { dir: 'sw', x, y: y + h }, { dir: 'w', x, y: mY }
+    { dir: 'nw', x, y }, { dir: 'n', x: midX, y }, { dir: 'ne', x: x + w, y },
+    { dir: 'e', x: x + w, y: midY }, { dir: 'se', x: x + w, y: y + h }, { dir: 's', x: midX, y: y + h },
+    { dir: 'sw', x, y: y + h }, { dir: 'w', x, y: midY }
   ];
 }
 
-function detectHandle(pt) {
-  const handles = getHandles(state.selection);
-  return handles.find((h) => Math.abs(h.x - pt.x) <= 6 && Math.abs(h.y - pt.y) <= 6) || null;
+function detectHandle(point) {
+  return getHandles(state.selection).find((h) => (
+    Math.abs(h.x - point.x) <= HANDLE_SIZE && Math.abs(h.y - point.y) <= HANDLE_SIZE
+  )) || null;
+}
+
+function loadImage(dataURL) {
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.src = dataURL;
+  });
 }
 
 function snapshot() {
   state.history.push(JSON.stringify(state.annotations));
-  if (state.history.length > 50) state.history.shift();
+  if (state.history.length > 100) {
+    state.history.shift();
+  }
 }
 
 function undo() {
-  const last = state.history.pop();
-  if (last) state.annotations = JSON.parse(last);
-  render();
+  if (!state.history.length) {
+    setHint('没有可撤销的步骤');
+    return;
+  }
+  state.annotations = JSON.parse(state.history.pop());
+  setHint('已撤销一步');
 }
 
-function drawBaseAndMask() {
+function drawHint() {
+  if (state.mode !== 'idle' && state.mode !== 'selecting') return;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,.65)';
+  ctx.fillRect(16, 16, 260, 28);
+  ctx.fillStyle = '#fff';
+  ctx.font = '14px "Microsoft YaHei"';
+  ctx.fillText(state.hintText, 26, 35);
+  ctx.restore();
+}
+
+function drawBaseMaskAndSelection() {
   if (!state.screenshotImage) return;
+
   ctx.drawImage(state.screenshotImage, 0, 0, canvas.width, canvas.height);
   ctx.fillStyle = 'rgba(0,0,0,0.45)';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -85,368 +144,489 @@ function drawBaseAndMask() {
   if (state.selection) {
     const { x, y, w, h } = state.selection;
     ctx.drawImage(state.screenshotImage, x, y, w, h, x, y, w, h);
-    ctx.strokeStyle = '#00c853';
+
+    ctx.strokeStyle = '#00C853';
     ctx.lineWidth = 1;
     ctx.strokeRect(x + 0.5, y + 0.5, w, h);
 
     getHandles(state.selection).forEach((h) => {
       ctx.fillStyle = '#fff';
-      ctx.fillRect(h.x - 4, h.y - 4, 8, 8);
-      ctx.strokeStyle = '#00c853';
-      ctx.strokeRect(h.x - 4, h.y - 4, 8, 8);
+      ctx.fillRect(h.x - HANDLE_SIZE / 2, h.y - HANDLE_SIZE / 2, HANDLE_SIZE, HANDLE_SIZE);
+      ctx.strokeStyle = '#00C853';
+      ctx.strokeRect(h.x - HANDLE_SIZE / 2, h.y - HANDLE_SIZE / 2, HANDLE_SIZE, HANDLE_SIZE);
     });
   }
+
+  drawHint();
 }
 
-function renderAnnotation(a) {
+function renderAnnotation(annotation) {
   offctx.save();
-  offctx.strokeStyle = a.color;
-  offctx.fillStyle = a.color;
-  offctx.lineWidth = a.size;
+  offctx.strokeStyle = annotation.color;
+  offctx.fillStyle = annotation.color;
+  offctx.lineWidth = annotation.size;
   offctx.lineCap = 'round';
   offctx.lineJoin = 'round';
 
-  if (a.type === 'rect') offctx.strokeRect(a.x, a.y, a.w, a.h);
-  if (a.type === 'ellipse') {
-    offctx.beginPath();
-    offctx.ellipse(a.x + a.w / 2, a.y + a.h / 2, Math.abs(a.w / 2), Math.abs(a.h / 2), 0, 0, Math.PI * 2);
-    offctx.stroke();
-  }
-  if (a.type === 'arrow') {
-    const dx = a.x2 - a.x1;
-    const dy = a.y2 - a.y1;
-    const ang = Math.atan2(dy, dx);
-    offctx.beginPath();
-    offctx.moveTo(a.x1, a.y1);
-    offctx.lineTo(a.x2, a.y2);
-    offctx.stroke();
-    offctx.beginPath();
-    offctx.moveTo(a.x2, a.y2);
-    offctx.lineTo(a.x2 - 12 * Math.cos(ang - Math.PI / 6), a.y2 - 12 * Math.sin(ang - Math.PI / 6));
-    offctx.lineTo(a.x2 - 12 * Math.cos(ang + Math.PI / 6), a.y2 - 12 * Math.sin(ang + Math.PI / 6));
-    offctx.closePath();
-    offctx.fill();
-  }
-  if (a.type === 'brush') {
-    offctx.beginPath();
-    a.points.forEach((p, idx) => (idx === 0 ? offctx.moveTo(p.x, p.y) : offctx.lineTo(p.x, p.y)));
-    offctx.stroke();
-  }
-  if (a.type === 'mosaic') {
-    offctx.save();
-    offctx.globalAlpha = 0.75;
-    a.points.forEach((p) => offctx.fillRect(p.x - 6, p.y - 6, 12, 12));
-    offctx.restore();
-  }
-  if (a.type === 'text') {
-    offctx.font = `${12 + a.size * 2}px sans-serif`;
-    offctx.fillText(a.text || '文字', a.x, a.y);
-  }
-  if (a.type === 'emoji') {
-    offctx.font = `${16 + a.size * 2}px sans-serif`;
-    offctx.fillText('😀', a.x, a.y);
+  switch (annotation.type) {
+    case 'rect':
+      offctx.strokeRect(annotation.x, annotation.y, annotation.w, annotation.h);
+      break;
+    case 'ellipse':
+      offctx.beginPath();
+      offctx.ellipse(
+        annotation.x + annotation.w / 2,
+        annotation.y + annotation.h / 2,
+        Math.abs(annotation.w / 2),
+        Math.abs(annotation.h / 2),
+        0,
+        0,
+        Math.PI * 2
+      );
+      offctx.stroke();
+      break;
+    case 'arrow': {
+      const angle = Math.atan2(annotation.y2 - annotation.y1, annotation.x2 - annotation.x1);
+      offctx.beginPath();
+      offctx.moveTo(annotation.x1, annotation.y1);
+      offctx.lineTo(annotation.x2, annotation.y2);
+      offctx.stroke();
+
+      offctx.beginPath();
+      offctx.moveTo(annotation.x2, annotation.y2);
+      offctx.lineTo(annotation.x2 - 14 * Math.cos(angle - Math.PI / 7), annotation.y2 - 14 * Math.sin(angle - Math.PI / 7));
+      offctx.lineTo(annotation.x2 - 14 * Math.cos(angle + Math.PI / 7), annotation.y2 - 14 * Math.sin(angle + Math.PI / 7));
+      offctx.closePath();
+      offctx.fill();
+      break;
+    }
+    case 'brush':
+      offctx.beginPath();
+      annotation.points.forEach((p, idx) => {
+        if (idx === 0) offctx.moveTo(p.x, p.y);
+        else offctx.lineTo(p.x, p.y);
+      });
+      offctx.stroke();
+      break;
+    case 'mosaic':
+      offctx.save();
+      offctx.globalAlpha = 0.7;
+      annotation.points.forEach((p) => offctx.fillRect(p.x - 6, p.y - 6, 12, 12));
+      offctx.restore();
+      break;
+    case 'text':
+      offctx.font = `${14 + annotation.size * 2}px "Microsoft YaHei"`;
+      offctx.fillText(annotation.text, annotation.x, annotation.y);
+      break;
+    case 'emoji':
+      offctx.font = `${18 + annotation.size * 2}px sans-serif`;
+      offctx.fillText(annotation.emoji || '😀', annotation.x, annotation.y);
+      break;
+    default:
+      break;
   }
 
   offctx.restore();
 }
 
-function render() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+function drawMergedAnnotations() {
   offctx.clearRect(0, 0, offscreen.width, offscreen.height);
-
-  drawBaseAndMask();
-
   state.annotations.forEach(renderAnnotation);
   if (state.drawing) renderAnnotation(state.drawing);
 
-  if (state.selection) {
-    const { x, y, w, h } = state.selection;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(x, y, w, h);
-    ctx.clip();
-    ctx.drawImage(offscreen, 0, 0);
-    ctx.restore();
-  }
+  if (!state.selection) return;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(state.selection.x, state.selection.y, state.selection.w, state.selection.h);
+  ctx.clip();
+  ctx.drawImage(offscreen, 0, 0);
+  ctx.restore();
 }
 
-function setToolbarPosition() {
-  if (!state.selection) return;
+function render() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawBaseMaskAndSelection();
+  drawMergedAnnotations();
+  positionToolbar();
+}
+
+function positionToolbar() {
+  if (!state.selection || toolbar.classList.contains('hidden')) return;
   const top = Math.min(canvas.height - 56, state.selection.y + state.selection.h + 10);
-  const left = Math.max(6, Math.min(canvas.width - toolbar.offsetWidth - 6, state.selection.x));
+  const left = Math.max(8, Math.min(canvas.width - toolbar.offsetWidth - 8, state.selection.x));
   toolbar.style.top = `${top}px`;
   toolbar.style.left = `${left}px`;
 }
 
+function setSelectedTool(tool) {
+  state.activeTool = tool;
+  toolbar.querySelectorAll('button[data-id]').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.id === tool);
+  });
+}
+
 function makeToolbar() {
-  const addBtn = (id, label, group = false) => {
-    if (group) {
+  const groups = [
+    ['rect', 'ellipse', 'emoji', 'arrow', 'brush', 'mosaic', 'text'],
+    ['scroll', 'pin'],
+    ['undo', 'save', 'copy'],
+    ['cancel', 'ok']
+  ];
+
+  groups.forEach((group, groupIdx) => {
+    if (groupIdx > 0) {
       const sep = document.createElement('span');
       sep.className = 'sep';
       toolbar.appendChild(sep);
     }
-    const btn = document.createElement('button');
-    btn.textContent = label;
-    btn.dataset.id = id;
-    btn.addEventListener('mousedown', (e) => e.stopPropagation());
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      onToolbarAction(id);
-    });
-    toolbar.appendChild(btn);
-    return btn;
-  };
 
-  [...TOOLS, 'scroll', 'pin', 'undo', 'save', 'copy', 'cancel', 'ok'].forEach((id) => {
-    const labels = {
-      rect: '矩形', ellipse: '椭圆', emoji: '表情', arrow: '箭头', brush: '画笔', mosaic: '马赛克', text: '文字',
-      scroll: '滚动截图', pin: '钉图', undo: '撤销', save: '保存', copy: '复制', cancel: '取消', ok: '确认'
-    };
-    const beforeSep = ['scroll', 'undo', 'cancel'].includes(id);
-    addBtn(id, labels[id], beforeSep);
+    group.forEach((id) => {
+      const button = document.createElement('button');
+      button.dataset.id = id;
+      button.textContent = TOOL_LABELS[id];
+      button.addEventListener('mousedown', (event) => event.stopPropagation());
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        void handleToolbarAction(id);
+      });
+      toolbar.appendChild(button);
+    });
   });
+
+  const paletteWrap = document.createElement('div');
+  paletteWrap.className = 'palette';
 
   COLORS.forEach((color) => {
-    const btn = document.createElement('button');
-    btn.className = 'color';
-    btn.style.background = color;
-    btn.addEventListener('mousedown', (e) => e.stopPropagation());
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
+    const button = document.createElement('button');
+    button.className = 'color';
+    button.style.backgroundColor = color;
+    button.title = color;
+    button.addEventListener('mousedown', (event) => event.stopPropagation());
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
       state.color = color;
     });
-    toolbar.appendChild(btn);
+    paletteWrap.appendChild(button);
   });
+  toolbar.appendChild(paletteWrap);
 
-  const sizeSel = document.createElement('select');
+  const sizeSelect = document.createElement('select');
+  sizeSelect.className = 'size';
   SIZES.forEach((size) => {
     const opt = document.createElement('option');
-    opt.value = size;
+    opt.value = String(size);
     opt.textContent = `${size}px`;
-    sizeSel.appendChild(opt);
+    sizeSelect.appendChild(opt);
   });
-  sizeSel.addEventListener('mousedown', (e) => e.stopPropagation());
-  sizeSel.addEventListener('change', () => { state.size = Number(sizeSel.value); });
-  toolbar.appendChild(sizeSel);
+  sizeSelect.value = String(state.size);
+  sizeSelect.addEventListener('mousedown', (event) => event.stopPropagation());
+  sizeSelect.addEventListener('change', () => {
+    state.size = Number(sizeSelect.value);
+  });
+
+  toolbar.appendChild(sizeSelect);
+  setSelectedTool(state.activeTool);
 }
 
-async function onToolbarAction(id) {
-  if (TOOLS.includes(id)) {
-    state.activeTool = id;
-    [...toolbar.querySelectorAll('button')].forEach((b) => b.classList.toggle('active', b.dataset.id === id));
+function createDraft(point) {
+  switch (state.activeTool) {
+    case 'brush':
+    case 'mosaic':
+      return { type: state.activeTool, points: [point], color: state.color, size: state.size };
+    case 'arrow':
+      return { type: 'arrow', x1: point.x, y1: point.y, x2: point.x, y2: point.y, color: state.color, size: state.size };
+    default:
+      return { type: state.activeTool, x: point.x, y: point.y, w: 0, h: 0, color: state.color, size: state.size };
+  }
+}
+
+function updateDraft(draft, point) {
+  if (draft.type === 'brush' || draft.type === 'mosaic') {
+    draft.points.push(point);
     return;
   }
-  if (id === 'cancel') return window.cutpro.close();
-  if (id === 'undo') return undo();
-  if (id === 'save') return saveSelection();
-  if (id === 'copy' || id === 'ok') return copyAndClose();
-  if (id === 'pin') return pinSelection();
-  if (id === 'scroll') return doScrollShot();
+  if (draft.type === 'arrow') {
+    draft.x2 = point.x;
+    draft.y2 = point.y;
+    return;
+  }
+  const rect = normalizeRect({ x: draft.x, y: draft.y }, point);
+  draft.x = rect.x;
+  draft.y = rect.y;
+  draft.w = rect.w;
+  draft.h = rect.h;
 }
 
-async function doScrollShot() {
-  const { frames } = await window.cutpro.scrollShot();
-  if (!frames?.length || !state.selection) return;
-  const imgList = await Promise.all(frames.map(loadImage));
-  const stitched = document.createElement('canvas');
-  stitched.width = state.selection.w;
-  stitched.height = state.selection.h * imgList.length;
-  const sctx = stitched.getContext('2d');
-  imgList.forEach((img, idx) => {
-    sctx.drawImage(img, state.selection.x, state.selection.y, state.selection.w, state.selection.h, 0, idx * state.selection.h, state.selection.w, state.selection.h);
-  });
-  const dataURL = stitched.toDataURL('image/png');
-  await window.cutpro.copyImage(dataURL);
+function startSelecting(point) {
+  state.mode = 'selecting';
+  state.dragStart = point;
+  state.selection = { x: point.x, y: point.y, w: 0, h: 0 };
+  toolbar.classList.add('hidden');
 }
 
-async function saveSelection() {
-  const dataURL = exportSelection();
-  await window.cutpro.saveImage(dataURL);
+function startInteractionInSelected(point) {
+  const handle = detectHandle(point);
+  if (handle) {
+    state.mode = 'resizing';
+    state.dragStart = point;
+    state.resizeDir = handle.dir;
+    return;
+  }
+
+  if (!pointInRect(point, state.selection)) {
+    startSelecting(point);
+    return;
+  }
+
+  // 按住空格可直接拖拽选区，否则进入标注绘制
+  if (state.activeTool === 'text') {
+    const text = window.prompt('输入文字：', 'CutPro') || 'CutPro';
+    snapshot();
+    state.annotations.push({ type: 'text', x: point.x, y: point.y, text, color: state.color, size: state.size });
+    render();
+    return;
+  }
+
+  if (state.activeTool === 'emoji') {
+    snapshot();
+    state.annotations.push({ type: 'emoji', x: point.x, y: point.y, emoji: '😀', color: state.color, size: state.size });
+    render();
+    return;
+  }
+
+  if (window.__spaceMoving) {
+    state.mode = 'moving';
+    state.moveOffset = { x: point.x - state.selection.x, y: point.y - state.selection.y };
+    return;
+  }
+
+  snapshot();
+  state.mode = 'drawing';
+  state.dragStart = point;
+  state.drawing = createDraft(point);
 }
 
-async function copyAndClose() {
-  const dataURL = exportSelection();
-  await window.cutpro.copyImage(dataURL);
-  await window.cutpro.close();
+function resizeSelection(point) {
+  if (!state.selection || !state.dragStart) return;
+
+  const dx = point.x - state.dragStart.x;
+  const dy = point.y - state.dragStart.y;
+  const rect = { ...state.selection };
+
+  if (state.resizeDir.includes('e')) rect.w += dx;
+  if (state.resizeDir.includes('s')) rect.h += dy;
+  if (state.resizeDir.includes('w')) {
+    rect.x += dx;
+    rect.w -= dx;
+  }
+  if (state.resizeDir.includes('n')) {
+    rect.y += dy;
+    rect.h -= dy;
+  }
+
+  if (rect.w < MIN_SELECT_SIZE) rect.w = MIN_SELECT_SIZE;
+  if (rect.h < MIN_SELECT_SIZE) rect.h = MIN_SELECT_SIZE;
+
+  state.selection = rect;
+  clampSelection();
+  state.dragStart = point;
 }
 
-async function pinSelection() {
-  const dataURL = exportSelection();
-  await window.cutpro.pinImage(dataURL);
+function updateMagnifier(point) {
+  if (state.mode !== 'selecting') {
+    magnifier.classList.add('hidden');
+    return;
+  }
+
+  const px = ctx.getImageData(Math.max(0, point.x), Math.max(0, point.y), 1, 1).data;
+  magnifier.innerHTML = `坐标: ${point.x}, ${point.y}<br />颜色: rgb(${px[0]}, ${px[1]}, ${px[2]})`;
+  magnifier.style.left = `${Math.min(canvas.width - 132, point.x + 18)}px`;
+  magnifier.style.top = `${Math.min(canvas.height - 84, point.y + 18)}px`;
+  magnifier.classList.remove('hidden');
 }
 
-function exportSelection() {
-  const { x, y, w, h } = state.selection;
-  const out = document.createElement('canvas');
-  out.width = w;
-  out.height = h;
-  const octx = out.getContext('2d');
-  octx.drawImage(state.screenshotImage, x, y, w, h, 0, 0, w, h);
-  octx.drawImage(offscreen, x, y, w, h, 0, 0, w, h);
-  return out.toDataURL('image/png');
-}
+canvas.addEventListener('mousedown', (event) => {
+  const point = { x: event.offsetX, y: event.offsetY };
 
-function loadImage(dataURL) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.src = dataURL;
-  });
-}
-
-canvas.addEventListener('mousedown', (e) => {
-  const pt = { x: e.offsetX, y: e.offsetY };
-  state.mouse = pt;
+  if (!state.screenshotImage) return;
 
   if (state.mode === 'idle') {
-    state.mode = 'selecting';
-    state.dragStart = pt;
-    state.selection = { x: pt.x, y: pt.y, w: 0, h: 0 };
+    startSelecting(point);
+    render();
     return;
   }
 
   if (state.mode === 'selected') {
-    const handle = detectHandle(pt);
-    if (handle) {
-      state.mode = 'resizing';
-      state.resizeDir = handle.dir;
-      state.dragStart = pt;
-      return;
-    }
-
-    if (pointInRect(pt, state.selection) && e.altKey) {
-      state.mode = 'moving';
-      state.dragStart = pt;
-      return;
-    }
-
-    if (pointInRect(pt, state.selection)) {
-      snapshot();
-      if (state.activeTool === 'text') {
-        const text = prompt('输入文字：', 'CutPro') || 'CutPro';
-        state.annotations.push({ type: 'text', x: pt.x, y: pt.y, text, color: state.color, size: state.size });
-        render();
-        return;
-      }
-      if (state.activeTool === 'emoji') {
-        state.annotations.push({ type: 'emoji', x: pt.x, y: pt.y, color: state.color, size: state.size });
-        render();
-        return;
-      }
-      state.mode = 'drawing';
-      state.dragStart = pt;
-      state.drawing = createDraft(pt);
-    }
+    startInteractionInSelected(point);
+    render();
   }
 });
 
-canvas.addEventListener('mousemove', (e) => {
-  const pt = { x: e.offsetX, y: e.offsetY };
-  state.mouse = pt;
+canvas.addEventListener('mousemove', (event) => {
+  const point = { x: event.offsetX, y: event.offsetY };
 
-  if (state.mode === 'selecting') {
-    state.selection = normalizeRect(state.dragStart, pt);
-  } else if (state.mode === 'drawing' && state.drawing) {
-    updateDraft(state.drawing, pt);
-  } else if (state.mode === 'moving') {
-    const dx = pt.x - state.dragStart.x;
-    const dy = pt.y - state.dragStart.y;
-    state.selection.x += dx;
-    state.selection.y += dy;
-    state.dragStart = pt;
-    setToolbarPosition();
+  if (state.mode === 'selecting' && state.dragStart) {
+    state.selection = normalizeRect(state.dragStart, point);
   } else if (state.mode === 'resizing') {
-    resizeSelection(pt);
-    setToolbarPosition();
+    resizeSelection(point);
+  } else if (state.mode === 'moving' && state.moveOffset) {
+    state.selection.x = point.x - state.moveOffset.x;
+    state.selection.y = point.y - state.moveOffset.y;
+    clampSelection();
+  } else if (state.mode === 'drawing' && state.drawing) {
+    updateDraft(state.drawing, point);
   }
 
-  updateMagnifier(pt);
+  updateMagnifier(point);
   render();
 });
 
 canvas.addEventListener('mouseup', () => {
   if (state.mode === 'selecting') {
-    if (state.selection.w > 5 && state.selection.h > 5) {
+    if (state.selection && state.selection.w >= MIN_SELECT_SIZE && state.selection.h >= MIN_SELECT_SIZE) {
       state.mode = 'selected';
       toolbar.classList.remove('hidden');
-      setToolbarPosition();
+      setHint('已选中区域，可进行标注');
     } else {
       state.mode = 'idle';
       state.selection = null;
+      setHint('拖拽鼠标框选截图区域');
     }
   } else if (state.mode === 'drawing') {
     if (state.drawing) state.annotations.push(state.drawing);
     state.drawing = null;
     state.mode = 'selected';
-  } else if (state.mode === 'moving' || state.mode === 'resizing') {
+  } else if (state.mode === 'resizing' || state.mode === 'moving') {
     state.mode = 'selected';
   }
+
   render();
 });
 
-function createDraft(pt) {
-  if (state.activeTool === 'brush' || state.activeTool === 'mosaic') {
-    return { type: state.activeTool, points: [pt], color: state.color, size: state.size };
+async function exportSelection() {
+  if (!state.selection || !state.screenshotImage) {
+    throw new Error('未选择截图区域');
   }
-  if (state.activeTool === 'arrow') {
-    return { type: 'arrow', x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y, color: state.color, size: state.size };
-  }
-  return { type: state.activeTool, x: pt.x, y: pt.y, w: 0, h: 0, color: state.color, size: state.size };
+
+  const { x, y, w, h } = state.selection;
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+
+  const outCtx = out.getContext('2d');
+  outCtx.drawImage(state.screenshotImage, x, y, w, h, 0, 0, w, h);
+  outCtx.drawImage(offscreen, x, y, w, h, 0, 0, w, h);
+
+  return out.toDataURL('image/png');
 }
 
-function updateDraft(draft, pt) {
-  if (draft.type === 'brush' || draft.type === 'mosaic') {
-    draft.points.push(pt);
-  } else if (draft.type === 'arrow') {
-    draft.x2 = pt.x;
-    draft.y2 = pt.y;
-  } else {
-    const rect = normalizeRect({ x: draft.x, y: draft.y }, pt);
-    draft.x = rect.x; draft.y = rect.y; draft.w = rect.w; draft.h = rect.h;
+async function copyAndClose() {
+  const dataUrl = await exportSelection();
+  await window.cutpro.copyImage(dataUrl);
+  await window.cutpro.close();
+}
+
+async function saveSelection() {
+  const dataUrl = await exportSelection();
+  const result = await window.cutpro.saveImage(dataUrl);
+  if (result?.saved) {
+    setHint(`已保存: ${result.filePath}`);
   }
 }
 
-function resizeSelection(pt) {
-  const sel = state.selection;
-  const dx = pt.x - state.dragStart.x;
-  const dy = pt.y - state.dragStart.y;
-  const dir = state.resizeDir;
-
-  if (dir.includes('e')) sel.w += dx;
-  if (dir.includes('s')) sel.h += dy;
-  if (dir.includes('w')) { sel.x += dx; sel.w -= dx; }
-  if (dir.includes('n')) { sel.y += dy; sel.h -= dy; }
-
-  sel.w = Math.max(10, sel.w);
-  sel.h = Math.max(10, sel.h);
-  state.dragStart = pt;
+async function pinSelection() {
+  const dataUrl = await exportSelection();
+  await window.cutpro.pinImage(dataUrl);
+  setHint('已创建钉图窗口');
 }
 
-function updateMagnifier(pt) {
-  if (state.mode !== 'selecting') {
-    magnifier.classList.add('hidden');
+async function doScrollShot() {
+  if (!state.selection) return;
+  setHint('滚动截图采集中...');
+
+  const { frames } = await window.cutpro.scrollShot({ count: 5, interval: 180 });
+  if (!frames || frames.length < 1) {
+    setHint('滚动截图失败');
     return;
   }
-  const px = ctx.getImageData(Math.max(0, pt.x - 1), Math.max(0, pt.y - 1), 1, 1).data;
-  magnifier.innerHTML = `坐标: ${pt.x}, ${pt.y}<br/>颜色: rgb(${px[0]},${px[1]},${px[2]})`;
-  magnifier.style.left = `${Math.min(canvas.width - 130, pt.x + 20)}px`;
-  magnifier.style.top = `${Math.min(canvas.height - 80, pt.y + 20)}px`;
-  magnifier.classList.remove('hidden');
+
+  const images = await Promise.all(frames.map(loadImage));
+  const stitched = document.createElement('canvas');
+  stitched.width = state.selection.w;
+  stitched.height = state.selection.h * images.length;
+  const stitchedCtx = stitched.getContext('2d');
+
+  images.forEach((img, idx) => {
+    stitchedCtx.drawImage(
+      img,
+      state.selection.x,
+      state.selection.y,
+      state.selection.w,
+      state.selection.h,
+      0,
+      idx * state.selection.h,
+      state.selection.w,
+      state.selection.h
+    );
+  });
+
+  await window.cutpro.copyImage(stitched.toDataURL('image/png'));
+  setHint(`滚动截图完成，共 ${images.length} 帧，已复制`);
 }
 
-document.addEventListener('keydown', async (e) => {
-  if (e.key === 'Escape') {
-    await window.cutpro.close();
-  } else if (e.key === 'Enter' && state.selection) {
-    await copyAndClose();
-  } else if (e.ctrlKey && e.key.toLowerCase() === 's' && state.selection) {
-    e.preventDefault();
+async function handleToolbarAction(id) {
+  if (TOOL_ORDER.includes(id)) {
+    setSelectedTool(id);
+    return;
+  }
+
+  if (id === 'scroll') {
+    await doScrollShot();
+  } else if (id === 'pin') {
+    await pinSelection();
+  } else if (id === 'undo') {
+    undo();
+  } else if (id === 'save') {
     await saveSelection();
+  } else if (id === 'copy' || id === 'ok') {
+    await copyAndClose();
+  } else if (id === 'cancel') {
+    await window.cutpro.close();
+  }
+
+  render();
+}
+
+document.addEventListener('keydown', async (event) => {
+  if (event.key === ' ') {
+    window.__spaceMoving = true;
+  }
+
+  if (event.key === 'Escape') {
+    await window.cutpro.close();
+  } else if (event.key === 'Enter' && state.selection) {
+    await copyAndClose();
+  } else if (event.ctrlKey && event.key.toLowerCase() === 's' && state.selection) {
+    event.preventDefault();
+    await saveSelection();
+  }
+});
+
+document.addEventListener('keyup', (event) => {
+  if (event.key === ' ') {
+    window.__spaceMoving = false;
   }
 });
 
 window.cutpro.onInit(async ({ screenshot }) => {
   state.screenshotImage = await loadImage(screenshot);
+  state.mode = 'idle';
+  state.selection = null;
+  state.annotations = [];
+  state.history = [];
+  toolbar.classList.add('hidden');
+  setHint('拖拽鼠标框选截图区域');
   resizeCanvas();
 });
 
