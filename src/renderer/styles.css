@@ -1,0 +1,61 @@
+html, body, #app {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: "Microsoft YaHei", sans-serif;
+  user-select: none;
+}
+
+#stage {
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+}
+
+#toolbar {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(24, 24, 24, 0.95);
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 6px;
+  color: #fff;
+  z-index: 20;
+}
+
+#toolbar button,
+#toolbar select {
+  border: 1px solid #444;
+  background: #2d2d2d;
+  color: #fff;
+  border-radius: 4px;
+  font-size: 12px;
+  padding: 4px 6px;
+}
+
+#toolbar button.active { background: #0f8f5e; }
+#toolbar .sep { width: 1px; height: 18px; background: #4b4b4b; margin: 0 3px; }
+#toolbar .color {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  padding: 0;
+}
+#toolbar.hidden, #magnifier.hidden { display: none; }
+
+#magnifier {
+  position: absolute;
+  z-index: 21;
+  width: 120px;
+  height: 70px;
+  background: rgba(0, 0, 0, 0.8);
+  border: 1px solid #4f4f4f;
+  border-radius: 8px;
+  color: #fff;
+  font-size: 12px;
+  padding: 6px;
+}
